@@ -28,7 +28,7 @@ from sedat.utils import zscore_standardize
 from sedat.visualization import plot_pipeline_overview
 
 DATA_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "data", "Subject_1 Class0 10.mat"
+    os.path.dirname(os.path.abspath(__file__)), "..", "data", "Test EEG 1.mat"
 )
 FS = 100.0  # Hz, per the MI-D1 dataset acquisition parameters (Table 1).
 NUM_TOKENS = 5  # per the manuscript's ablation (Section 3.5): a 3.5 s epoch at

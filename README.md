@@ -193,13 +193,13 @@ python examples/run_real_eeg_demo.py
 ```
 
 Runs the same pipeline on one real motor-imagery epoch
-(`data/Subject_1 Class0 10.mat`, 118 channels, 100 Hz, 3.5 s).
+(`data/Test EEG 1.mat`, 118 channels, 100 Hz, 3.5 s).
 
 ```bash
 python examples/run_test_eeg_batch.py
 ```
 
-Runs SEDAT over 10 more real epochs (`data/Test EEG 1.mat` .. `Test EEG
+Runs SEDAT over all 10 real epochs (`data/Test EEG 1.mat` .. `Test EEG
 10.mat`, one per subject/class combination) and prints a summary table
 (IMF count, segment count, resolved token length, zero-padding, timing)
 plus one figure per epoch.
@@ -217,7 +217,7 @@ below for what it does and an honest account of its results.
 
 ## Data
 
-`data/` ships 11 real EEG epochs from the **MI EEG Dataset IVa** (BCI
+`data/` ships 10 real EEG epochs from the **MI EEG Dataset IVa** (BCI
 Competition III, 100 Hz variant): one 3.5 s, 118-channel motor-imagery
 trial per file, spanning 5 subjects and both motor-imagery classes (right
 hand / right foot). This is the dataset aliased **MI-D1** in the SEDAT
