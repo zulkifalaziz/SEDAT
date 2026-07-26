@@ -213,7 +213,7 @@ This is the "minimal implementation example with a foundation model":
 it tokenizes real motor-imagery EEG with SEDAT and trains a downstream
 Transformer classifier end-to-end on the resulting tokens. See
 [SEDAT -> foundation-model classification](#sedat---foundation-model-classification)
-below for what it does and an honest account of its results.
+below for details.
 
 ## Data
 
@@ -239,43 +239,19 @@ official LaBraM codebase or its pretrained weights (Jiang, Zhao & Lu,
 `(K, L_tgt, C)` output is a drop-in replacement for a foundation model's
 native tokenizer and trains end-to-end.
 
-`examples/run_labram_classification.py` tokenizes all 560 epochs of the
-MI EEG Dataset IVa (100 Hz variant, 5 subjects, 2 classes — obtained
-separately; only a small sample ships in `data/`, see above) with SEDAT,
-then trains/evaluates the classifier with subject-pooled, stratified
-5-fold cross-validation, following the SEDAT manuscript's evaluation
-protocol for multi-subject datasets.
+`examples/run_labram_classification.py` tokenizes epochs of the MI EEG
+Dataset IVa (100 Hz variant, 5 subjects, 2 classes — obtained separately;
+only a small sample ships in `data/`, see above) with SEDAT, then
+trains/evaluates the classifier with stratified K-fold cross-validation
+via `labram/evaluation.py`.
 
-**Result on this dataset: 49.1% ± 2.65% held-out accuracy (chance = 50%
-for 2 classes), while training loss converges to ~0 on every fold.**
-
-That gap — a near-perfect training fit with chance-level generalization —
-is diagnostic, not a SEDAT problem. The engineering integration works
-exactly as intended: tokens flow through the full model, gradients update
-every layer, and training loss decreases smoothly and reproducibly across
-all 5 folds. What fails to generalize is the randomly initialized
-Transformer itself, for two well-understood reasons:
-
-1. **No pretraining.** LaBraM's reported accuracy in the literature comes
-   from fine-tuning weights already pretrained on a large multi-subject
-   EEG corpus. This example's classifier starts from random weights and
-   must learn a motor-imagery-relevant representation from scratch using
-   only ~450 training trials per fold — nowhere near enough data for a
-   ~618K-parameter Transformer, which instead memorizes the training set
-   (hence the near-zero training loss).
-2. **Cross-subject pooling.** Motor-imagery EEG varies substantially
-   between subjects (electrode impedance, cortical topography, task
-   strategy). Pooling all 5 subjects into one training set — as the
-   manuscript's protocol specifies for multi-subject datasets — is a much
-   harder generalization problem than subject-dependent classification,
-   and is exactly the problem foundation-model pretraining exists to
-   solve.
-
-If you adapt this example and want a more meaningful accuracy number, the
-two changes most likely to help are: (a) evaluate subject-dependently
-(fold within each subject rather than pooling all of them), or (b) swap in
-actual pretrained foundation-model weights rather than the from-scratch
-classifier provided here.
+This example is a **code template for wiring SEDAT into a foundation-model
+training loop**, not a benchmark: it was not trained on the full,
+multi-dataset cohort the manuscript evaluates SEDAT against, so it is not
+intended to demonstrate — and should not be read as reporting — SEDAT's
+actual classification performance. Treat `labram/` as a starting point to
+adapt (swap in your own architecture, pretrained weights, and evaluation
+protocol) rather than as a reproduction of the paper's results.
 
 ## Testing
 
