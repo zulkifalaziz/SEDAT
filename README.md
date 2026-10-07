@@ -30,19 +30,25 @@ The DAGAF decomposition stage is based on:
 
 ## What's in this repository
 
-- **`sedat/`** — the tokenizer itself: a dependency-light, pure NumPy/SciPy
-  implementation of all four SEDAT stages, independently testable and
-  usable as a standalone library.
-- **`labram/`** — a minimal, runnable example of feeding SEDAT's token
-  output into a downstream EEG foundation-model-style architecture
-  (a from-scratch, LaBraM-inspired Transformer classifier), including a
-  full training/evaluation loop on real motor-imagery EEG.
-- **`examples/`** — runnable demo scripts, from a synthetic signal to a
-  full 560-epoch real-data classification experiment.
-- **`data/`** — a handful of real EEG epochs (see [Data](#data) below) so
-  the demos run out of the box with no external dataset download.
-- **`tests/`** — a pytest suite covering every pipeline stage, the model
-  architecture, and integration tests against real EEG data.
+The repository contains the tokenizer only: the **`sedat/`** package, a
+dependency-light, pure NumPy/SciPy implementation of all four SEDAT stages.
+Each stage is an independently usable module, and `SEDATTokenizer` chains
+them behind a single entry point. Docstrings throughout cite the
+corresponding equations and sections of the manuscript.
+
+```
+sedat/
+├── __init__.py              Public API: SEDATConfig, SEDATTokenizer, TokenizationResult, ...
+├── config.py                Dataclass configuration for every stage
+├── tokenizer.py             SEDATTokenizer orchestrator (public entry point)
+├── spatial_aggregation.py   Step 1: SE channel weighting
+├── decomposition.py         Step 2: DAGAF sifting (FFT-based, O(N log N))
+├── segmentation.py          Step 3: instantaneous-frequency boundary detection
+├── resampling.py            Step 4: Fourier-domain resampling and token stacking
+├── utils.py                 Shared helpers: input validation, z-scoring, extrema counting
+├── visualization.py         Optional matplotlib diagnostics (imported lazily)
+└── exceptions.py            Custom exception hierarchy
+```
 
 ## The SEDAT pipeline
 
@@ -67,14 +73,15 @@ sequential stages:
    single moment of greatest oscillatory instability, yielding exactly one
    physiologically anchored boundary per mode. Boundaries that would
    produce degenerate micro-segments are pruned.
-4. **Resampling & Token Formation** (`sedat/resampling.py`) — the
-   resulting variable-length segments are FFT-resampled to a common
-   target length and stacked into the final token tensor. If fewer than
-   `K` usable segments survive pruning, the tensor is zero-padded so every
+4. **Resampling & Token Formation** (`sedat/resampling.py`) — the raw trial
+   is cut at the surviving boundaries, the `K` longest segments are kept (in
+   chronological order), FFT-resampled to a common target length `L_tgt`,
+   and stacked into the final token tensor. If fewer than `K` usable
+   segments survive pruning, the remaining slots are zero-padded so every
    trial produces an identically shaped output.
 
-`sedat/tokenizer.py` exposes `SEDATTokenizer`, the single public entry
-point that orchestrates all four stages and returns a `SEDATResult`
+`SEDATTokenizer` (in `sedat/tokenizer.py`) is the single public entry point
+that orchestrates all four stages. It returns a `TokenizationResult`
 dataclass containing the token tensor, every intermediate stage's
 diagnostics, and per-stage timing.
 
@@ -83,33 +90,26 @@ diagnostics, and per-stage timing.
 ```bash
 git clone https://github.com/zulkifalaziz/SEDAT.git
 cd SEDAT
-pip install -r requirements.txt
+pip install numpy scipy
 ```
 
-The core tokenizer depends only on NumPy and SciPy. For an editable
-package install:
+Requirements: Python 3.9+, NumPy ≥ 1.24, SciPy ≥ 1.10. The plotting helpers
+in `sedat.visualization` additionally need `matplotlib` ≥ 3.7
+(`pip install matplotlib`); the core package never imports it.
 
-```bash
-pip install -e .
-```
-
-Plotting (used by the example scripts) requires `matplotlib`, and the
-LaBraM-style classification example requires PyTorch and scikit-learn:
-
-```bash
-pip install -e .[dev]          # everything, for development/testing
-# or selectively:
-pip install -e .[viz]          # tokenizer + plotting only
-pip install -r requirements-labram.txt   # + torch, scikit-learn
-```
+`sedat/` is a self-contained package. Run Python from the repository root so
+that `import sedat` resolves, add the repository root to your `PYTHONPATH`,
+or copy the `sedat/` folder into your own project.
 
 ## Quick start
 
 ```python
 import numpy as np
 from sedat import SEDATConfig, SEDATTokenizer
+from sedat.utils import zscore_standardize
 
-x = np.random.randn(1000, 32)  # (T, C) — 1000 samples, 32 channels
+x = np.random.randn(1000, 32)   # (T, C): 1000 samples, 32 channels; use your own epoch here
+x = zscore_standardize(x)       # per-channel standardization (see "Input conventions")
 
 config = SEDATConfig(sampling_rate=250.0, num_tokens=8)
 tokenizer = SEDATTokenizer(config)
@@ -119,20 +119,37 @@ print(result.tokens.shape)          # (8, L_tgt, 32)
 print(result.stage_timings_ms)      # per-stage timing breakdown
 ```
 
-Batch tokenization (each trial is tokenized independently, so batches are
-embarrassingly parallel):
+### Input conventions
+
+- `x` has shape `(T, C)` (time samples × channels), or `(T,)` for a single
+  channel. It must be finite (no NaN or infinity) and contain at least 8
+  samples; otherwise `InvalidInputError` is raised.
+- SEDAT is defined over a standardized input. `sedat.utils.zscore_standardize`
+  provides per-channel z-scoring as a convenience; substitute your own
+  preprocessing if you prefer.
+
+### Batch tokenization
+
+Each trial is tokenized independently (boundaries are trial-specific), so
+batches are embarrassingly parallel. `n_jobs=1` (the default) runs in the
+current process; larger values distribute trials across a process pool.
 
 ```python
-epochs = [np.random.randn(1000, 32) for _ in range(20)]
-results = tokenizer.transform_batch(epochs, n_jobs=4)
+if __name__ == "__main__":   # required on Windows and macOS when n_jobs > 1
+    epochs = [zscore_standardize(np.random.randn(1000, 32)) for _ in range(20)]
+    results = tokenizer.transform_batch(epochs, n_jobs=4)
 ```
 
-To reproduce a fixed token length across an entire dataset (required
-before batching tokens into a downstream neural network), pin
-`target_length` explicitly instead of letting SEDAT infer it per trial:
+### Fixed token length
+
+By default `L_tgt` is inferred per trial as the median segment length
+(capped at `max_target_length`, 512 by default), so different trials can
+produce different token lengths. To get identically shaped tensors across an
+entire dataset, which is required before batching tokens into a downstream
+neural network, pin `target_length` explicitly:
 
 ```python
-from sedat.config import ResamplingConfig
+from sedat import ResamplingConfig
 
 config = SEDATConfig(
     sampling_rate=100.0,
@@ -141,128 +158,53 @@ config = SEDATConfig(
 )
 ```
 
-## Project layout
+Every trial then yields a tensor of shape `(5, 64, C)`.
 
-```
-sedat/                      Core tokenizer library (NumPy/SciPy only)
-    config.py                Dataclass configuration for every stage
-    utils.py                 Shared numerical helpers (validation, extrema counting)
-    spatial_aggregation.py   Step 1 — SE channel weighting
-    decomposition.py         Step 2 — DAGAF sifting (FFT-based, O(N log N))
-    segmentation.py          Step 3 — instantaneous-frequency boundary detection
-    resampling.py            Step 4 — Fourier-domain resampling & token stacking
-    tokenizer.py             SEDATTokenizer orchestrator (public entry point)
-    visualization.py         Optional matplotlib diagnostics (imported lazily)
-    exceptions.py            Custom exception hierarchy
+## The result object
 
-labram/                      Minimal foundation-model integration example
-    config.py                 Architecture hyperparameters
-    model.py                   A from-scratch, LaBraM-style Transformer (PyTorch)
-    dataset.py                 Scans a folder of .mat epochs, tokenizes with SEDAT
-    evaluation.py              Stratified K-fold cross-validation training loop
-    visualization.py           Classification report figure
+`SEDATTokenizer.transform` returns a `TokenizationResult`;
+`transform_batch` returns a list of them.
 
-examples/
-    synthetic_signal.py       Synthetic multi-channel test-signal generator
-    eeg_io.py                  Shared `.mat` epoch loader used by the demos
-    run_demo.py                End-to-end demo on a synthetic signal
-    run_real_eeg_demo.py       End-to-end demo on one real EEG epoch
-    run_test_eeg_batch.py      Batch demo over 10 real epochs (data/)
-    run_labram_classification.py  Full SEDAT -> classifier training example
+| Field | Contents |
+| --- | --- |
+| `tokens` | Final tensor `Z`, shape `(K, L_tgt, C)` |
+| `spatial` | Step 1: `drive_signal` `(T,)`, `channel_weights` `(C,)`, `channel_energy` `(C,)` |
+| `dagaf` | Step 2: `imfs` (list of `(T,)` arrays, highest to lowest frequency), `residual`, `stop_reason`, `num_imfs` |
+| `segmentation` | Step 3: `boundaries` (pruned; always starts at 0 and ends at `T`), `raw_boundaries`, `per_imf_boundary` |
+| `resampling` | Step 4: `tokens`, `segment_lengths`, `selected_indices` (`-1` marks a zero-padded token) |
+| `target_length` | The `L_tgt` that was used |
+| `stage_timings_ms` | Per-stage time in milliseconds: `spatial_aggregation`, `decomposition`, `segmentation`, `resampling` |
+| `total_time_ms` | Sum of the stage timings |
 
-data/                        A handful of real EEG epochs (see Data below)
+## Configuration reference
 
-tests/                       Pytest suite for every module
-```
+Every stage has a frozen dataclass that validates its parameters when it is
+constructed, raising `InvalidInputError` for invalid values. Defaults follow
+the values reported in the manuscript.
 
-## Demos
+| Config (argument of `SEDATConfig`) | Parameter | Default | Description |
+| --- | --- | --- | --- |
+| `SEDATConfig` | `sampling_rate` | `250.0` | Sampling frequency of the input, in Hz |
+| | `num_tokens` | `8` | Number of tokens `K`; also sets the DAGAF decomposition depth |
+| | `max_target_length` | `512` | Upper bound on an automatically inferred `L_tgt` |
+| `SpatialAggregationConfig` (`spatial`) | `gamma` | `10.0` | Sigmoid temperature |
+| | `delta` | `0.5` | Sigmoid shift center |
+| | `eps` | `1e-8` | Numerical guard in the min-max normalization |
+| | `enabled` | `True` | `False` bypasses SE aggregation (it is also bypassed automatically for single-channel input) |
+| `DAGAFConfig` (`dagaf`) | `chi` | `2.0` | Scales the Gaussian window half-length |
+| | `alpha` | `3.0` | Gaussian window shape |
+| | `max_imfs` | `num_tokens` | Maximum decomposition depth; `SEDATConfig` always keeps it equal to `num_tokens` |
+| | `energy_tol` | `1e-10` | Sifting stops once an extracted IMF's energy falls below this value |
+| `SegmentationConfig` (`segmentation`) | `min_segment_length` | `4` | Minimum segment length `L_min`, in samples; closer boundaries are pruned |
+| `ResamplingConfig` (`resampling`) | `target_length` | `None` | Fixed `L_tgt`; `None` infers it per trial |
 
-```bash
-python examples/run_demo.py
-```
+## Visualization (optional)
 
-Generates a synthetic 16-channel signal with four distinct oscillatory
-regimes (mimicking abrupt neural state transitions), runs the full SEDAT
-pipeline, prints per-stage diagnostics and timing, and saves a multi-panel
-figure to `examples/output/sedat_demo.png` (the raw signal, the SE drive
-signal and channel weights, the DAGAF IMFs, the segmentation boundaries,
-and the final token power map).
-
-```bash
-python examples/run_real_eeg_demo.py
-```
-
-Runs the same pipeline on one real motor-imagery epoch
-(`data/Test EEG 1.mat`, 118 channels, 100 Hz, 3.5 s).
-
-```bash
-python examples/run_test_eeg_batch.py
-```
-
-Runs SEDAT over all 10 real epochs (`data/Test EEG 1.mat` .. `Test EEG
-10.mat`, one per subject/class combination) and prints a summary table
-(IMF count, segment count, resolved token length, zero-padding, timing)
-plus one figure per epoch.
-
-```bash
-pip install -r requirements-labram.txt
-python examples/run_labram_classification.py
-```
-
-This is the "minimal implementation example with a foundation model":
-it tokenizes real motor-imagery EEG with SEDAT and trains a downstream
-Transformer classifier end-to-end on the resulting tokens. See
-[SEDAT -> foundation-model classification](#sedat---foundation-model-classification)
-below for details.
-
-## Data
-
-`data/` ships 10 real EEG epochs from the **MI EEG Dataset IVa** (BCI
-Competition III, 100 Hz variant): one 3.5 s, 118-channel motor-imagery
-trial per file, spanning 5 subjects and both motor-imagery classes (right
-hand / right foot). This is the dataset aliased **MI-D1** in the SEDAT
-manuscript. These files are included solely so the example scripts run
-without requiring a separate dataset download; they are a small subset for
-demonstration, not the full corpus. Filenames follow the source dataset's
-`Subject_<S> Class<C> <index>.mat` convention, each containing a single
-`Data` array of shape `(350, 118)` (time samples × channels).
-
-## SEDAT -> foundation-model classification
-
-`labram/` is a minimal example of plugging SEDAT's token tensor into a
-downstream foundation-model architecture. It is a small, from-scratch
-reimplementation of LaBraM's architectural pattern (learned token
-embedding, a CLS token, learnable positional embeddings, a pre-norm
-Transformer encoder, and a linear classification head) — **not** the
-official LaBraM codebase or its pretrained weights (Jiang, Zhao & Lu,
-2024, arXiv:2405.18765). It exists to demonstrate that SEDAT's
-`(K, L_tgt, C)` output is a drop-in replacement for a foundation model's
-native tokenizer and trains end-to-end.
-
-`examples/run_labram_classification.py` tokenizes epochs of the MI EEG
-Dataset IVa (100 Hz variant, 5 subjects, 2 classes — obtained separately;
-only a small sample ships in `data/`, see above) with SEDAT, then
-trains/evaluates the classifier with stratified K-fold cross-validation
-via `labram/evaluation.py`.
-
-This example is a **code template for wiring SEDAT into a foundation-model
-training loop**, not a benchmark: it was not trained on the full,
-multi-dataset cohort the manuscript evaluates SEDAT against, so it is not
-intended to demonstrate — and should not be read as reporting — SEDAT's
-actual classification performance. Treat `labram/` as a starting point to
-adapt (swap in your own architecture, pretrained weights, and evaluation
-protocol) rather than as a reproduction of the paper's results.
-
-## Testing
-
-```bash
-pip install -e .[dev]
-pytest tests/ -v
-```
-
-The suite covers unit tests for every SEDAT stage, the LaBraM-style model
-architecture, and integration tests that run the full pipeline against the
-real EEG epochs in `data/`.
+`sedat.visualization.plot_pipeline_overview(x, result, fs, save_path=...)`
+renders a multi-panel figure covering every stage: the raw signal, the SE
+drive signal and channel weights, the DAGAF IMFs, the segmentation
+boundaries, and the final token power map. It requires `matplotlib` and is
+imported lazily, so the core package works without it.
 
 ## Design notes
 
@@ -281,7 +223,8 @@ real EEG epochs in `data/`.
   zero tokens so every trial produces an identically shaped tensor.
 - **Validation**: all configuration dataclasses validate their parameters
   eagerly in `__post_init__`, and `SEDATTokenizer.transform` validates the
-  input array (shape, finiteness) before any numerical work begins.
+  input array (shape, finiteness, minimum length) before any numerical work
+  begins.
 
 ## Citation
 
